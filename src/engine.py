@@ -10,7 +10,8 @@ import time
 from vllm import AsyncLLMEngine
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest, CompletionRequest, ErrorResponse
+from vllm.entrypoints.openai.serving_tokenization import OpenAIServingTokenization
+from vllm.entrypoints.openai.protocol import ChatCompletionRequest, CompletionRequest, TokenizeRequest, DetokenizeRequest, ErrorResponse
 
 from utils import DummyRequest, JobInput, BatchSize, create_error_response
 from constants import DEFAULT_MAX_CONCURRENCY, DEFAULT_BATCH_SIZE, DEFAULT_BATCH_SIZE_GROWTH_FACTOR, DEFAULT_MIN_BATCH_SIZE
@@ -143,12 +144,27 @@ class OpenAIvLLMEngine(vLLMEngine):
             prompt_adapters=None,
             request_logger=None
         )
+        self.tokenizer = OpenAIServingTokenization(
+            async_engine_client=self.llm,
+            model_config=self.model_config,
+            served_model_names=[self.served_model_name],
+            lora_modules=None,
+            prompt_adapters=None,
+            request_logger=None
+        )
+        
     
     async def generate(self, openai_request: JobInput):
         if openai_request.openai_route == "/v1/models":
             yield await self._handle_model_request()
         elif openai_request.openai_route in ["/v1/chat/completions", "/v1/completions"]:
             async for response in self._handle_chat_or_completion_request(openai_request):
+                yield response
+        elif openai_request.openai_route == "/v1/tokenize":
+            async for response in self._handle_tokenize_request(openai_request):
+                yield response
+        elif openai_request.openai_route == "/v1/detokenize":
+            async for response in self._handle_detokenize_request(openai_request):
                 yield response
         else:
             yield create_error_response("Invalid route").model_dump()
@@ -206,4 +222,32 @@ class OpenAIvLLMEngine(vLLMEngine):
                 if self.raw_openai_output:
                     batch = "".join(batch)
                 yield batch
+                
+    async def _handle_tokenize_request(self, openai_request: JobInput):
+        try:
+            request = TokenizeRequest(**openai_request.openai_input)
+        except Exception as e:
+            yield create_error_response(str(e)).model_dump()
+            return
+
+        try:
+            response = await self.tokenizer.create_tokenize(request)  
+            yield response.model_dump()
+        except Exception as e:
+            yield create_error_response(str(e)).model_dump()
+            
+    async def _handle_detokenize_request(self, openai_request: JobInput):
+        try:
+            request = DetokenizeRequest(**openai_request.openai_input)
+        except Exception as e:
+            yield create_error_response(str(e)).model_dump()
+            return
+        
+        try:
+            response = await self.tokenizer.create_detokenize(request)  
+            yield response.model_dump()
+        except Exception as e:
+            yield create_error_response(str(e)).model_dump()
+                    
+    
             
